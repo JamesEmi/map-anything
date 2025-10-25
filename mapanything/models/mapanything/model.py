@@ -2074,7 +2074,15 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
             for name in view.keys():
                 if name in ignore_keys:
                     continue
-                view[name] = view[name].to(self.device, non_blocking=True)
+                value = view[name]
+                # Handle tuple-valued entries (e.g., camera_poses as (quats, trans))
+                if isinstance(value, tuple):
+                    view[name] = tuple(
+                        x.to(self.device, non_blocking=True) if hasattr(x, "to") else x
+                        for x in value
+                    )
+                else:
+                    view[name] = value.to(self.device, non_blocking=True)
 
         # Pre-process the input views
         processed_views = preprocess_input_views_for_inference(validated_views)
