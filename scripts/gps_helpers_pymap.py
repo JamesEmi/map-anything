@@ -92,24 +92,32 @@ def attach_translation_poses_from_gps(
         gps_csv_path: str,
         tolerance_ms: float = 100.0
 ) -> Tuple[int, int]:
-    
     gps_rows = read_gps_csv(gps_csv_path)
     origin = gps_rows[0]
     tol_ns = int(tolerance_ms * 1e6)
 
     matches = match_images_to_gps(image_paths, gps_rows, tolerance_ns=tol_ns)
 
-    #identity quaternion
-    quat = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype = torch.float32)
+    # Find earliest matched view index and drop all views prior to it to satisfy
+    # the model constraint that the first view must have a pose if any do.
+    matched_view_indices = [int(v.get("idx", 0)) for v in views if image_paths[int(v.get("idx", 0))] in matches]
+    if matched_view_indices:
+        first_match_idx = min(matched_view_indices)
+        # Drop all views with idx < first_match_idx (in-place)
+        views[:] = [v for v in views if int(v.get("idx", 0)) >= first_match_idx]
+
+    # identity quaternion
+    quat = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=torch.float32)
 
     matched_count = 0
     for v in views:
-        idx = int(v["idx"]) if "idx" in v else 0
+        idx = int(v.get("idx", 0))
         path = image_paths[idx]
         gps = matches.get(path, None)
 
         if gps is None:
-            gps=origin
+            # Leave unmatched views without camera_poses (RGB-only)
+            continue
 
         # pymap3d ENU
         e, n, u = pm.geodetic2enu(gps.lat, gps.lon, gps.alt, origin.lat, origin.lon, origin.alt)
@@ -117,6 +125,6 @@ def attach_translation_poses_from_gps(
         trans_rdf = torch.tensor([float(e), float(-u), float(n)], dtype=torch.float32)
         v["camera_poses"] = (quat.clone()[None], trans_rdf.clone()[None])
         v["is_metric_scale"] = torch.tensor([True])
-        if path in matches:
-            matched_count += 1
+        matched_count += 1
+
     return matched_count, len(views)
