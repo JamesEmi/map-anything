@@ -18,8 +18,6 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import numpy as np
 import rerun as rr
 import torch
-import trimesh
-# import open3d
 
 from mapanything.models import MapAnything
 from mapanything.utils.geometry import depthmap_to_world_frame
@@ -28,7 +26,6 @@ from mapanything.utils.viz import (
     predictions_to_glb,
     script_add_rerun_args,
 )
-
 
 def log_data_to_rerun(
     image, depthmap, pose, intrinsics, pts3d, mask, base_name, pts_name, viz_mask=None
@@ -121,9 +118,6 @@ def get_parser():
         help="Output path for GLB file (default: output.glb)",
     )
 
-    parser.add_argument("--save_ply", action="store_true", default=False, help="Save point cloud as PLY")
-    parser.add_argument("--ply_output_path", type=str, default="output.ply", help="PLY output path")
-
     return parser
 
 
@@ -170,9 +164,12 @@ def main():
         print("Starting visualization...")
         viz_string = "MapAnything_Visualization"
         rr.script_setup(args, viz_string)
-        rr.set_time("stable_time", sequence=0)
+        # rr.set_time("stable_time", sequence=0) 
+        rr.set_time("build", sequence=0) 
         rr.log("mapanything", rr.ViewCoordinates.RDF, static=True)
 
+    all_pts = []
+    all_cols = []
     # Loop through the outputs
     for view_idx, pred in enumerate(outputs):
         # Extract data from predictions
@@ -191,39 +188,90 @@ def main():
         pts3d_np = pts3d_computed.cpu().numpy()
         image_np = pred["img_no_norm"][0].cpu().numpy()
 
+        seq = view_idx
+        rr.set_time("build", sequence=seq)  # advance time
+
+        # accumulate for 'built-out' playback
+        pts_now = pts3d_np[mask].reshape(-1, 3)
+        cols_now = (image_np[mask].reshape(-1, 3) * 255).astype("uint8")
+        all_pts.append(pts_now)
+        all_cols.append(cols_now)
+
+        cum_pts = np.concatenate(all_pts, axis=0)
+        cum_cols = np.concatenate(all_cols, axis=0)
+
+        
+
         # Store data for GLB export if needed
-        if args.save_glb or args.save_ply:
+        if args.save_glb:
             world_points_list.append(pts3d_np)
             images_list.append(image_np)
             masks_list.append(mask)
 
         # Log to Rerun if visualization is enabled
         if args.viz:
-            log_data_to_rerun(
-                image=image_np,
-                depthmap=depthmap_torch.cpu().numpy(),
-                pose=camera_pose_torch.cpu().numpy(),
-                intrinsics=intrinsics_torch.cpu().numpy(),
-                pts3d=pts3d_np,
-                mask=mask,
-                base_name=f"mapanything/view_{view_idx}",
-                pts_name=f"mapanything/pointcloud_view_{view_idx}",
-                viz_mask=mask,
+            # log_data_to_rerun(
+            #     image=image_np,
+            #     depthmap=depthmap_torch.cpu().numpy(),
+            #     pose=camera_pose_torch.cpu().numpy(),
+            #     intrinsics=intrinsics_torch.cpu().numpy(),
+            #     pts3d=pts3d_np,
+            #     mask=mask,
+            #     base_name=f"mapanything/view_{view_idx}",
+            #     pts_name=f"mapanything/pointcloud_view_{view_idx}",
+            #     viz_mask=mask,
+            # )
+            rr.log("mapanything/camera/pinhole/rgb", rr.Image(image_np))
+            
+            rr.log(
+                "mapanything/camera",
+                rr.Transform3D(translation=camera_pose_torch[:3, 3].cpu().numpy(),
+                            mat3x3=camera_pose_torch[:3, :3].cpu().numpy()),
+            )
+            rr.log(
+                "mapanything/camera/pinhole",
+                rr.Pinhole(
+                    image_from_camera=intrinsics_torch.cpu().numpy(),
+                    height=image_np.shape[0],
+                    width=image_np.shape[1],
+                    camera_xyz=rr.ViewCoordinates.RDF,
+                ),
+            )
+            # # log the cumulative map under a constant path
+            # rr.log(
+            #     "mapanything/pointcloud_cumulative",
+            #     rr.Points3D(positions=cum_pts, colors=cum_cols),
+            # )
+            rr.log(
+                "mapanything/pointcloud_step",
+                rr.Points3D(positions=pts_now, colors=cols_now),
             )
 
     if args.viz:
         print("Visualization complete! Check the Rerun viewer.")
+        # one final full map (downsample to keep size in check)
+        final_pts = np.concatenate(all_pts, axis=0)
+        final_cols = np.concatenate(all_cols, axis=0)
 
+        # optional subsample
+        max_points = 2000000  # tune
+        if final_pts.shape[0] > max_points:
+            sel = np.random.choice(final_pts.shape[0], size=max_points, replace=False)
+            final_pts = final_pts[sel]
+            final_cols = final_cols[sel]
 
-    if args.save_glb or args.save_ply:
+        rr.set_time("build", sequence=len(outputs))
+        rr.log("mapanything/pointcloud_final", rr.Points3D(positions=final_pts, colors=final_cols))
+
+    # Export GLB if requested
+    if args.save_glb:
+        print(f"Saving GLB file to: {args.output_path}")
+
         # Stack all views
         world_points = np.stack(world_points_list, axis=0)
         images = np.stack(images_list, axis=0)
         final_masks = np.stack(masks_list, axis=0)
-        
-    # Export GLB if requested
-    if args.save_glb:
-        print(f"Saving GLB file to: {args.output_path}")
+
         # Create predictions dict for GLB export
         predictions = {
             "world_points": world_points,
@@ -240,23 +288,6 @@ def main():
     else:
         print("Skipping GLB export (--save_glb not specified)")
 
-    if args.save_ply:
-        vertices = world_points.reshape(-1, 3)
-        colors = (images.reshape(-1, 3) * 255).astype(np.uint8)
-        mask = final_masks.reshape(-1).astype(bool)
-        vertices = vertices[mask]
-        colors = colors[mask]
-
-        # optional downsample to keep file small
-        # max_points = 5_000_000
-        # if vertices.shape[0] > max_points:
-        #     sel = np.random.choice(vertices.shape[0], size=max_points, replace=False)
-        #     vertices, colors = vertices[sel], colors[sel]
-
-        trimesh.PointCloud(vertices=vertices, colors=colors).export(args.ply_output_path)
-        print(f"Saved PLY to: {args.ply_output_path}")
-    else:
-        print("Skipping PLY export (--save_ply not specified)")
 
 if __name__ == "__main__":
     main()
