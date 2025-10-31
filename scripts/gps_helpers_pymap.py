@@ -106,9 +106,6 @@ def attach_translation_poses_from_gps(
         # Drop all views with idx < first_match_idx (in-place)
         views[:] = [v for v in views if int(v.get("idx", 0)) >= first_match_idx]
 
-    # identity quaternion
-    quat = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=torch.float32)
-
     matched_count = 0
     for v in views:
         idx = int(v.get("idx", 0))
@@ -123,7 +120,9 @@ def attach_translation_poses_from_gps(
         e, n, u = pm.geodetic2enu(gps.lat, gps.lon, gps.alt, origin.lat, origin.lon, origin.alt)
         # Map ENU -> OpenCV RDF world: [E, -U, N]
         trans_rdf = torch.tensor([float(e), float(-u), float(n)], dtype=torch.float32)
-        v["camera_poses"] = (quat.clone()[None], trans_rdf.clone()[None])
+        # v["camera_poses"] = (quat.clone()[None], trans_rdf.clone()[None])
+        # Provide translation-only priors; rotation should be recovered.
+        v["camera_poses"] = trans_rdf.clone()[None]
         v["is_metric_scale"] = torch.tensor([True])
         matched_count += 1
 
