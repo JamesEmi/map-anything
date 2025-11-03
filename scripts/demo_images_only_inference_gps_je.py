@@ -285,6 +285,19 @@ def main():
         intrinsics_torch = pred["intrinsics"][0]  # (3, 3)
         camera_pose_torch = pred["camera_poses"][0]  # (4, 4)
 
+        R = camera_pose_torch[:3, :3].cpu().numpy()
+        t = camera_pose_torch[:3, 3].cpu().numpy()
+        axis_scale = 0.5  # tune
+        # after you have camera_pose_torch for each view
+        R = camera_pose_torch[:3, :3].cpu().numpy()
+        t = camera_pose_torch[:3, 3].cpu().numpy()
+        axis_scale = 0.5  # tune
+        triad = np.stack([t, t + R[:,0]*axis_scale, t, t + R[:,1]*axis_scale, t, t + R[:,2]*axis_scale]).reshape(3,2,3)
+        rr.log("diag/camera_axes",
+            rr.Arrows3D(origins=np.array([t,t,t]), vectors=R.T*axis_scale,
+                        colors=np.array([[255,0,0],[0,255,0],[0,0,255]], dtype=np.uint8)))               
+
+
         # Compute new pts3d using depth, intrinsics, and camera pose
         pts3d_computed, valid_mask = depthmap_to_world_frame(
             depthmap_torch, intrinsics_torch, camera_pose_torch
