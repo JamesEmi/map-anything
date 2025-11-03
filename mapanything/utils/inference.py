@@ -32,6 +32,7 @@ ALLOWED_VIEW_KEYS = {
     "ray_directions",  # Optional - ray directions in camera frame
     "intrinsics",  # Optional - pinhole camera intrinsics (conflicts with ray_directions)
     "camera_poses",  # Optional - camera poses
+    "camera_pose_trans",  # Optional - translation-only prior (cam2world translation in chosen world frame)
     "is_metric_scale",  # Optional - whether inputs are metric scale
     "true_shape",  # Optional - original image shape
     "idx",  # Optional - index of the view

@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import os
+import pymap3d as pm
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -30,7 +31,9 @@ from mapanything.utils.viz import (
     script_add_rerun_args,
 )
 # from mapanything.utils.gps_helpers_pymap import attach_translation_poses_from_gps
-from gps_helpers_pymap import attach_translation_poses_from_gps
+from gps_helpers_pymap import read_gps_csv, match_images_to_gps, attach_translation_poses_from_gps
+
+
 
 
 def _downsample_points_and_colors(points: np.ndarray, colors: np.ndarray, max_points: int, rng_seed: int = 0):
@@ -237,6 +240,40 @@ def main():
         rr.script_setup(args, viz_string)
         rr.set_time("build", sequence=0)
         rr.log("mapanything", rr.ViewCoordinates.RDF, static=True)
+
+    # GPS debug viz
+    gps_rows = read_gps_csv(args.gps_csv)
+    origin = gps_rows[0]
+    matches = match_images_to_gps(
+        image_paths=image_paths,
+        gps=gps_rows,
+        tolerance_ns=int(args.tolerance_ms * 1e6)
+    )
+    # gather matched GPS traj for the kept views; mapped to RDF world - [E, -U, N]
+    gps_traj = []
+    for v in views:
+        idx = int(v.get("idx", 0))
+        g = matches.get(image_paths[idx])
+        if g is None:
+            continue
+        e, n, u = pm.geodetic2enu(g.lat, g.lon, g.alt, origin.lat, origin.lon, origin.alt)
+        gps_traj.append([e, -u, n])
+    gps_traj = np.asarray(gps_traj, dtype=np.float32)
+
+    est_traj = []
+    for pred in outputs:
+        cam_pose = pred["camera_poses"][0].cpu().numpy()
+        est_traj.append(cam_pose[:3, 3])
+    est_traj = np.asarray(est_traj, dtype=np.float32)
+
+    if args.viz:
+        # log GPS debug info
+        if gps_traj.shape[0] > 0:
+            rr.log("gps/traj_points", rr.Points3D(positions=gps_traj))
+            rr.log("gps/traj_line", rr.LineStrips3D(strips=[gps_traj]))
+        if est_traj.shape[0] > 0:
+            rr.log("est/traj_points", rr.Points3D(positions=est_traj, radii=0.03, colors=np.array([[0,255,0]], dtype=np.uint8)))
+            rr.log("est/traj_line", rr.LineStrips3D(strips=[est_traj]))
 
     # Accumulators for viewer & final outputs
     all_pts = []
