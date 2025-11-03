@@ -250,15 +250,21 @@ def main():
         tolerance_ns=int(args.tolerance_ms * 1e6)
     )
     # gather matched GPS traj for the kept views; mapped to RDF world - [E, -U, N]
-    gps_traj = []
+    gps_rdf = []
+    gps_swap = []
+    gps_enu = []
     for v in views:
         idx = int(v.get("idx", 0))
         g = matches.get(image_paths[idx])
         if g is None:
             continue
         e, n, u = pm.geodetic2enu(g.lat, g.lon, g.alt, origin.lat, origin.lon, origin.alt)
-        gps_traj.append([e, -u, n])
-    gps_traj = np.asarray(gps_traj, dtype=np.float32)
+        gps_rdf.append([e, -u, n])
+        gps_enu.append([e, n, u])
+        gps_swap.append([n, -u, e])
+    gps_rdf = np.asarray(gps_rdf, dtype=np.float32)
+    gps_swap = np.asarray(gps_swap, dtype=np.float32)
+    gps_enu = np.asarray(gps_enu, dtype=np.float32)
 
     est_traj = []
     for pred in outputs:
@@ -268,9 +274,13 @@ def main():
 
     if args.viz:
         # log GPS debug info
-        if gps_traj.shape[0] > 0:
-            rr.log("gps/traj_points", rr.Points3D(positions=gps_traj))
-            rr.log("gps/traj_line", rr.LineStrips3D(strips=[gps_traj]))
+        if gps_rdf.shape[0] > 0:
+            # rr.log("gps/rdf_points", rr.Points3D(positions=gps_rdf))
+            # rr.log("gps/rdf_line", rr.LineStrips3D(strips=[gps_rdf]))
+            rr.log("gps/enu_points", rr.Points3D(positions=gps_enu))
+            rr.log("gps/enu_line", rr.LineStrips3D(strips=[gps_enu]))
+            # rr.log("gps/swap_points", rr.Points3D(positions=gps_swap))
+            # rr.log("gps/swap_line", rr.LineStrips3D(strips=[gps_swap]))
         if est_traj.shape[0] > 0:
             rr.log("est/traj_points", rr.Points3D(positions=est_traj, radii=0.03, colors=np.array([[0,255,0]], dtype=np.uint8)))
             rr.log("est/traj_line", rr.LineStrips3D(strips=[est_traj]))
@@ -292,7 +302,12 @@ def main():
         R = camera_pose_torch[:3, :3].cpu().numpy()
         t = camera_pose_torch[:3, 3].cpu().numpy()
         axis_scale = 0.5  # tune
-        triad = np.stack([t, t + R[:,0]*axis_scale, t, t + R[:,1]*axis_scale, t, t + R[:,2]*axis_scale]).reshape(3,2,3)
+        # triad = np.stack([t, t + R[:,0]*axis_scale, t, t + R[:,1]*axis_scale, t, t + R[:,2]*axis_scale]).reshape(3,2,3)
+        xw, yw, zw = R[:, 0] * axis_scale, R[:, 1] * axis_scale, R[:, 2] * axis_scale
+        origins = np.stack([t, t, t], axis=0)
+        vectors = np.stack([xw, yw, zw], axis=0)
+        colors = np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255]], dtype=np.uint8)
+        rr.log("mapanything/camera/axes", rr.Arrows3D(origins=origins, vectors=vectors, colors=colors))
         rr.log("diag/camera_axes",
             rr.Arrows3D(origins=np.array([t,t,t]), vectors=R.T*axis_scale,
                         colors=np.array([[255,0,0],[0,255,0],[0,0,255]], dtype=np.uint8)))               
@@ -352,6 +367,15 @@ def main():
         # one final full map (downsample to keep size in check)
         final_pts = np.concatenate(all_pts, axis=0) if len(all_pts) > 0 else np.empty((0, 3))
         final_cols = np.concatenate(all_cols, axis=0) if len(all_cols) > 0 else np.empty((0, 3), dtype=np.uint8)
+
+        # run once over concatenated points all_pts (Nx3)
+        P = final_pts - final_pts.mean(0, keepdims=True)
+        _, _, Vt = np.linalg.svd(P, full_matrices=False)
+        normal = Vt[-1]  # unit normal
+        print("Plane normal ~", normal, "angles to axes:",
+            "X", np.degrees(np.arccos(np.clip(np.abs(normal[0]), -1, 1))),
+            "Y", np.degrees(np.arccos(np.clip(np.abs(normal[1]), -1, 1))),
+            "Z", np.degrees(np.arccos(np.clip(np.abs(normal[2]), -1, 1))))
 
         # optional subsample
         max_points = args.max_points if hasattr(args, "max_points") else 2_000_000
