@@ -674,10 +674,22 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         pose_trans_non_ref_views = []
         pose_quats_ref_view_0 = []
         pose_trans_ref_view_0 = []
+        # track which samples have valid quaternions provided
+        has_cam_quats_mask = torch.zeros(
+            batch_size_per_view * num_views
+        )
+        # Collect translation-only assignments across views (abs indices, relative translations)
+        ___trans_only_assignments = []
+
+        def id_quat(n: int): # id quat helper
+            return torch.Tensor([0.0, 0.0, 0.0, 1.0], dtype=dtype, device=device).repeat(n,1)
+
         for view_idx in range(num_views):
             per_sample_cam_input_mask_for_curr_view = per_sample_cam_input_mask[
                 view_idx * batch_size_per_view : (view_idx + 1) * batch_size_per_view
             ]
+            has_quats = "camera_pose_quats" in views[view_idx]
+            has_trans = "camera_pose_trans" in views[view_idx]
             if (
                 "camera_pose_quats" in views[view_idx]
                 and "camera_pose_trans" in views[view_idx]
@@ -703,6 +715,19 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
                 # Append to the list
                 pose_quats_ref_view_0.append(cam_pose_quats)
                 pose_trans_ref_view_0.append(cam_pose_trans)
+            elif(
+                "camera_pose_trans" in views[view_idx]
+                and "camera_pose_trans" in views[0]
+                and per_sample_cam_input_mask_for_curr_view.any()
+            ):
+                curr_mask = per_sample_cam_input_mask_for_curr_view
+                local_idx = torch.nonzero(curr_mask, as_tuple=False).squeeze(-1)
+                if local_idx.numel() > 0:
+                    abs_idx = view_idx * batch_size_per_view + local_idx
+                    cam_pose_trans = views[view_idx]["camera_pose_trans"][curr_mask].to(device=device, dtype=dtype)
+                    ref_pose_trans = views[0]["camera_pose_trans"][curr_mask].to(device=device, dtype=dtype)
+                    rel_trans = cam_pose_trans - ref_pose_trans
+                    ___trans_only_assignments.append((abs_idx, rel_trans))
             else:
                 per_sample_cam_input_mask[
                     view_idx * batch_size_per_view : (view_idx + 1)
@@ -717,12 +742,15 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
             (batch_size_per_view * num_views, 3), dtype=dtype, device=device
         )
 
+        for abs_idx, rel_trans in ___trans_only_assignments:
+            pose_trans_across_views[abs_idx] = rel_trans
+
         # Compute the pose quats and trans for all the non-reference views in the frame of the reference view 0
         if len(pose_quats_non_ref_views) > 0:
             # Stack the pose quats and trans for all the non-reference views and reference view 0
             pose_quats_non_ref_views = torch.cat(pose_quats_non_ref_views, dim=0)
             pose_trans_non_ref_views = torch.cat(pose_trans_non_ref_views, dim=0)
-            pose_quats_ref_view_0 = torch.cat(pose_quats_ref_view_0, dim=0)
+            pose_quats_ref_view_0 = torch.cat(pose_quats_ref_view_0, dim=0) # don't rename here!
             pose_trans_ref_view_0 = torch.cat(pose_trans_ref_view_0, dim=0)
 
             # Compute the pose quats and trans for all the non-reference views in the frame of the reference view 0
@@ -748,6 +776,7 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
             pose_quats_across_views,
             pose_trans_across_views,
             per_sample_cam_input_mask,
+            has_cam_quats_mask,
         )
 
     def _encode_and_fuse_ray_dirs(
@@ -757,6 +786,7 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         batch_size_per_view,
         all_encoder_features_across_views,
         per_sample_ray_dirs_input_mask,
+        has_cam_quats_mask,
     ):
         """
         Encode the ray directions for all the views and fuse it with the other encoder features in a single forward pass.
@@ -1018,6 +1048,7 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         pose_quats_across_views,
         pose_trans_across_views,
         per_sample_cam_input_mask,
+        has_cam_quats_mask,
     ):
         """
         Encode the camera quats and trans for all the views and fuse it with the other encoder features in a single forward pass.
@@ -1030,7 +1061,7 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
             pose_quats_across_views (torch.Tensor): Tensor containing the pose quats for all the views in the frame of the reference view 0. (batch_size_per_view * view, 4)
             pose_trans_across_views (torch.Tensor): Tensor containing the pose trans for all the views in the frame of the reference view 0. (batch_size_per_view * view, 3)
             per_sample_cam_input_mask (torch.Tensor): Tensor containing the per sample camera input mask.
-
+            has_cam_quats_mask,
         Returns:
             torch.Tensor: A tensor containing the encoded features for all the views.
         """
@@ -1038,9 +1069,10 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         pose_quats_features_across_views = self.cam_rot_encoder(
             EncoderGlobalRepInput(data=pose_quats_across_views)
         ).features
-        # Zero out the pose quat features where the camera input mask is False
+        rot_keep_mask = (per_sample_cam_input_mask & has_cam_quats_mask)
+        # Zero out the rotation features unless rot quat provided for that sample
         pose_quats_features_across_views = (
-            pose_quats_features_across_views * per_sample_cam_input_mask.unsqueeze(-1)
+            pose_quats_features_across_views * rot_keep_mask.unsqueeze(-1)
         )
 
         # Get the metric scale mask for all samples
@@ -1108,7 +1140,7 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         pose_trans_scale_features_across_views = self.cam_trans_scale_encoder(
             EncoderGlobalRepInput(data=log_pose_trans_norm_factors_across_views)
         ).features
-        # Zero out the pose trans scale features where the camera input mask is False
+        # Zero out the pose trans scale features where the camera input mask is False (aka keep pose trans feats where pose is active - regardless of quats)
         pose_trans_scale_features_across_views = (
             pose_trans_scale_features_across_views
             * per_sample_cam_input_mask.unsqueeze(-1)
@@ -1202,7 +1234,7 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
 
         # Compute the pose quats and trans for all the non-reference views in the frame of the reference view 0
         # Returned pose quats and trans represent identity pose for views/samples where the camera input mask is False
-        pose_quats_across_views, pose_trans_across_views, per_sample_cam_input_mask = (
+        pose_quats_across_views, pose_trans_across_views, per_sample_cam_input_mask, has_cam_quats_mask = (
             self._compute_pose_quats_and_trans_for_across_views_in_ref_view(
                 views,
                 num_views,
@@ -1240,6 +1272,7 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
             pose_quats_across_views,
             pose_trans_across_views,
             per_sample_cam_input_mask,
+            has_cam_quats_mask,
         )
 
         # Normalize the fused features (permute -> normalize -> permute)
@@ -2108,5 +2141,4 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
 
         # Restore the original configuration
         self._restore_original_geometric_input_config()
-
         return preds
