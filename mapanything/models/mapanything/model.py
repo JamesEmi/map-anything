@@ -676,13 +676,14 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         pose_trans_ref_view_0 = []
         # track which samples have valid quaternions provided
         has_cam_quats_mask = torch.zeros(
-            batch_size_per_view * num_views
+            batch_size_per_view * num_views,
+            dtype=torch.bool, device=device
         )
         # Collect translation-only assignments across views (abs indices, relative translations)
         ___trans_only_assignments = []
 
         def id_quat(n: int): # id quat helper
-            return torch.Tensor([0.0, 0.0, 0.0, 1.0], dtype=dtype, device=device).repeat(n,1)
+            return torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=dtype, device=device).repeat(n,1)
 
         for view_idx in range(num_views):
             per_sample_cam_input_mask_for_curr_view = per_sample_cam_input_mask[
@@ -786,7 +787,6 @@ class MapAnything(nn.Module, PyTorchModelHubMixin):
         batch_size_per_view,
         all_encoder_features_across_views,
         per_sample_ray_dirs_input_mask,
-        has_cam_quats_mask,
     ):
         """
         Encode the ray directions for all the views and fuse it with the other encoder features in a single forward pass.
