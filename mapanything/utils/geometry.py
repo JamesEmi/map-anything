@@ -2186,3 +2186,28 @@ def normals_edge(
     )
     edge = angle_diff > np.deg2rad(tol)
     return edge
+
+def get_coord_system_transform(src, tgt):
+    """Return a 3x3 axis relabel/sign-flip matrix mapping vectors from src to tgt.
+
+    Axis letters:
+    - R/L: x-axis (Right/Left)
+    - U/D: y-axis (Up/Down)
+    - F/B: z-axis (Forward/Back)
+
+    Example: ENU (RFU) -> RDF: get_coord_system_transform("RFU", "RDF").
+    """
+    axes=dict(r=0,l=0,u=1,d=1,f=2,b=2)
+    T = torch.zeros((3,3), dtype=torch.float)
+    for i, tgt_dir in enumerate(tgt.lower()):
+        a =axes[tgt_dir]
+        for j, src_dir in enumerate(src.lower()):
+            b = axes[src_dir]
+            if a == b:
+                if src_dir == tgt_dir:
+                    sign = 1
+                else:
+                    sign = -1
+                T[i, j] = sign
+                break
+    return T
