@@ -91,7 +91,8 @@ def attach_translation_poses_from_gps(
         views: List[Dict],
         image_paths: List[str],
         gps_csv_path: str,
-        tolerance_ms: float = 100.0
+        tolerance_ms: float = 100.0,
+        drop_unmatched: bool = False,
 ) -> Tuple[int, int]:
     gps_rows = read_gps_csv(gps_csv_path)
     origin = gps_rows[0]
@@ -106,6 +107,9 @@ def attach_translation_poses_from_gps(
         first_match_idx = min(matched_view_indices)
         # Drop all views with idx < first_match_idx (in-place)
         views[:] = [v for v in views if int(v.get("idx", 0)) >= first_match_idx]
+
+    if drop_unmatched:
+        views[:] = [v for v in views if image_paths[int(v.get("idx", 0))] in matches]
 
     matched_count = 0
     for v in views:
