@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from mapanything.utils.geometry import get_coord_system_transform
 
 
 try:
@@ -118,10 +119,23 @@ def attach_translation_poses_from_gps(
 
         # pymap3d ENU
         e, n, u = pm.geodetic2enu(gps.lat, gps.lon, gps.alt, origin.lat, origin.lon, origin.alt)
-        # Map ENU -> OpenCV RDF world: [E, -U, N]
-        trans_rdf = torch.tensor([float(e), float(-u), float(n)], dtype=torch.float32)
+        # T_enu2rdf = get_coord_system_transform("RFU", "RDF")
+        trans_enu = torch.tensor([float(e), float(n), float(u)], dtype=torch.float32)
+
+        # 3D (about U axis): rotates [E, N, U] -> [N, -E, U]
+        # [E, N, U] -> [N, E, U]
+        Rz_cw90 = torch.tensor([
+            [0.0,  1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0,  0.0, 1.0],
+        ], dtype=torch.float32)
+        # import ipdb; ipdb.set_trace()
+        trans_enu_rot = Rz_cw90 @ trans_enu
+
+        # trans_rdf = T_enu2rdf @ trans_enu
         # Provide translation-only prior; rotation should be recovered by the model
-        v["camera_pose_trans"] = trans_rdf.clone()[None]
+        # v["camera_pose_trans"] = trans_rdf.clone()[None]
+        v["camera_pose_trans"] = trans_enu_rot.clone()[None]
         v["is_metric_scale"] = torch.tensor([True])
         matched_count += 1
 

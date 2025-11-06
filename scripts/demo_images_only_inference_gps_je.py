@@ -32,6 +32,7 @@ from mapanything.utils.viz import (
 )
 # from mapanything.utils.gps_helpers_pymap import attach_translation_poses_from_gps
 from gps_helpers_pymap import read_gps_csv, match_images_to_gps, attach_translation_poses_from_gps
+from mapanything.utils.geometry import get_coord_system_transform
 
 
 
@@ -249,45 +250,13 @@ def main():
         gps=gps_rows,
         tolerance_ns=int(args.tolerance_ms * 1e6)
     )
-    # gather matched GPS traj for the kept views; mapped to RDF world - [E, -U, N]
+    # gather matched GPS traj for the kept views
     gps_rdf = []
-    gps_swap = []
     gps_enu = []
-    for v in views:
-        idx = int(v.get("idx", 0))
-        g = matches.get(image_paths[idx])
-        if g is None:
-            continue
-        e, n, u = pm.geodetic2enu(g.lat, g.lon, g.alt, origin.lat, origin.lon, origin.alt)
-        gps_rdf.append([e, -u, n])
-        gps_enu.append([e, n, u])
-        gps_swap.append([n, -u, e])
-    gps_rdf = np.asarray(gps_rdf, dtype=np.float32)
-    gps_swap = np.asarray(gps_swap, dtype=np.float32)
-    gps_enu = np.asarray(gps_enu, dtype=np.float32)
-
-    est_traj = []
-    for pred in outputs:
-        cam_pose = pred["camera_poses"][0].cpu().numpy()
-        est_traj.append(cam_pose[:3, 3])
-    est_traj = np.asarray(est_traj, dtype=np.float32)
-
-    if args.viz:
-        # log GPS debug info
-        if gps_rdf.shape[0] > 0:
-            # rr.log("gps/rdf_points", rr.Points3D(positions=gps_rdf))
-            # rr.log("gps/rdf_line", rr.LineStrips3D(strips=[gps_rdf]))
-            rr.log("gps/enu_points", rr.Points3D(positions=gps_enu))
-            rr.log("gps/enu_line", rr.LineStrips3D(strips=[gps_enu]))
-            # rr.log("gps/swap_points", rr.Points3D(positions=gps_swap))
-            # rr.log("gps/swap_line", rr.LineStrips3D(strips=[gps_swap]))
-        if est_traj.shape[0] > 0:
-            rr.log("est/traj_points", rr.Points3D(positions=est_traj, radii=0.03, colors=np.array([[0,255,0]], dtype=np.uint8)))
-            rr.log("est/traj_line", rr.LineStrips3D(strips=[est_traj]))
-
     # Accumulators for viewer & final outputs
     all_pts = []
     all_cols = []
+    est_traj = []
     # Loop through the outputs
     for view_idx, pred in enumerate(outputs):
         # Extract data from predictions
@@ -295,10 +264,6 @@ def main():
         intrinsics_torch = pred["intrinsics"][0]  # (3, 3)
         camera_pose_torch = pred["camera_poses"][0]  # (4, 4)
 
-        R = camera_pose_torch[:3, :3].cpu().numpy()
-        t = camera_pose_torch[:3, 3].cpu().numpy()
-        axis_scale = 0.5  # tune
-        # after you have camera_pose_torch for each view
         R = camera_pose_torch[:3, :3].cpu().numpy()
         t = camera_pose_torch[:3, 3].cpu().numpy()
         axis_scale = 0.5  # tune
@@ -334,6 +299,44 @@ def main():
         if args.viz:
             # advance time on the 'build' timeline
             rr.set_time("build", sequence=view_idx)
+
+            # incrementally log estimated trajectory (upto current step)
+            current_t = camera_pose_torch[:3, 3].cpu().numpy()
+            est_traj.append(current_t)
+            est_arr = np.asarray(est_traj, dtype=np.float32)
+            rr.log(
+                "est/traj_points",
+                rr.Points3D(positions=est_arr, radii=0.03, colors=np.array([[0, 255, 0]], dtype=np.uint8)),
+            )
+            rr.log(
+                "est/traj_line",
+                rr.LineStrips3D(strips=[est_arr]),
+            )
+
+            view = views[view_idx]
+            idx_v = int(view.get("idx", 0))
+            g = matches.get(image_paths[idx_v])
+            if g is not None:
+                e, n, u = pm.geodetic2enu(g.lat, g.lon, g.alt, origin.lat, origin.lon, origin.alt)
+                # T_enu2rdf = get_coord_system_transform("RFU", "RDF")
+                trans_enu = torch.tensor([float(e), float(n), float(u)], dtype=torch.float32)
+
+                # 3D (about U axis): rotates [E, N, U] -> [N, -E, U]
+                # my take [E, N, U] -> [-N, E, U]
+                Rz_cw90 = torch.tensor([
+                    [0.0,  1.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0,  0.0, 1.0],
+                ], dtype=torch.float32)
+                trans_enu_rot = Rz_cw90 @ trans_enu
+                # trans_rdf = T_enu2rdf @ trans_enu
+                gps_enu.append(trans_enu_rot.cpu().numpy())
+                # gps_rdf.append(trans_rdf.cpu().numpy())
+                gps_arr = np.asarray(gps_enu, dtype=np.float32)
+                # rr.log("gps/enu2rdf_points", rr.Points3D(positions=gps_arr))
+                # rr.log("gps/enu2rdf_line", rr.LineStrips3D(strips=[gps_arr]))
+                rr.log("gps/enu_points", rr.Points3D(positions=gps_arr))
+                rr.log("gps/enu_line", rr.LineStrips3D(strips=[gps_arr]))
 
             # accumulate for 'built-out' playback
             pts_now = pts3d_np[mask].reshape(-1, 3)
