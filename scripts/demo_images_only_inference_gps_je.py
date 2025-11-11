@@ -32,6 +32,7 @@ from mapanything.utils.viz import (
 )
 # from mapanything.utils.gps_helpers_pymap import attach_translation_poses_from_gps
 from gps_helpers_pymap import read_gps_csv, match_images_to_gps, attach_translation_poses_from_gps
+from gps_helpers_pymap import extract_ts_ns, build_enu_interpolator
 from mapanything.utils.geometry import get_coord_system_transform
 
 
@@ -172,6 +173,13 @@ def get_parser():
         default=False,
         help="Drops all views that do not have a GPS match",
     )
+    parser.add_argument(
+        "--interp-gps",
+        dest="interp_gps",
+        action="store_true",
+        default=False,
+        help="Use interpolation (no tolerance) to attach GPS to all images within GPS span",
+    )
 
     return parser
 
@@ -210,20 +218,88 @@ def main():
     ]
     # Attach translation-only poses from GPS
     original_total = len(views)
-    matched, total = attach_translation_poses_from_gps(
-        views=views,
-        image_paths=image_paths,
-        gps_csv_path=args.gps_csv,
-        tolerance_ms=args.tolerance_ms,
-        drop_unmatched=args.sparse_view
-    )
-    post_total = len(views)
-    dropped = max(0, original_total - post_total)
-    unmatched_rgb_only = max(0, post_total - matched)
-    print(
-        f"Attached GPS translation poses to {matched}/{original_total} views; "
-        f"dropped {dropped} pre-match views; {unmatched_rgb_only} RGB-only views."
-    )
+
+    if args.interp_gps:
+        gps_rows = read_gps_csv(args.gps_csv)
+        interp_enu, _ = build_enu_interpolator(gps_rows)
+        # Precompute ENU for each view (NaN if out-of-span or missing ts)
+        enu_vals = []
+        valid = []
+        for v in views:
+            idx = int(v.get("idx", 0))
+            ts = extract_ts_ns(image_paths[idx])
+            if ts is None:
+                enu_vals.append(None); valid.append(False); continue
+            e, n, u = interp_enu(ts)
+            ok = np.isfinite(e) and np.isfinite(n) and np.isfinite(u)
+            enu_vals.append((float(e), float(n), float(u)) if ok else None)
+            valid.append(ok)
+
+        # Ensure first view has a pose if any do
+        if any(valid):
+            first_idx_in_views = next(i for i, ok in enumerate(valid) if ok)
+            views[:] = views[first_idx_in_views:]
+            enu_vals = enu_vals[first_idx_in_views:]
+            valid = valid[first_idx_in_views:]
+
+        # Optionally drop unmatched views
+        if args.sparse_view:
+            kept_views = []
+            kept_enu = []
+            for v, ok, enu in zip(views, valid, enu_vals):
+                if ok:
+                    kept_views.append(v)
+                    kept_enu.append(enu)
+            views[:] = kept_views
+            enu_vals = kept_enu
+            valid = [True] * len(views)
+
+        # Attach translation-only priors, zeroed at first valid
+        Rz_cw90 = torch.tensor([
+            [0.0,  1.0, 0.0],
+            [1.0,  0.0, 0.0],
+            [0.0,  0.0, 1.0],
+        ], dtype=torch.float32)
+
+        trans_enu_0 = None
+        matched = 0
+        for v, enu in zip(views, enu_vals):
+            if enu is None:
+                continue
+            e, n, u = enu
+            cur = torch.tensor([e, n, u], dtype=torch.float32)
+            if trans_enu_0 is None:
+                trans_enu_0 = cur
+            trans_enu = cur - trans_enu_0
+            trans_enu_rot = Rz_cw90 @ trans_enu
+
+            v["camera_pose_trans"] = trans_enu_rot.clone()[None]
+            v["is_metric_scale"] = torch.tensor([True])
+            matched += 1
+
+        post_total = len(views)
+        dropped = max(0, original_total - post_total)
+        unmatched_rgb_only = max(0, post_total - matched)
+        print(
+            f"Attached GPS translation poses (interp) to {matched}/{post_total} views; "
+            f"dropped {dropped} pre-match views; {unmatched_rgb_only} RGB-only views."
+        )
+        
+    else:
+        matched, total = attach_translation_poses_from_gps(
+            views=views,
+            image_paths=image_paths,
+            gps_csv_path=args.gps_csv,
+            tolerance_ms=args.tolerance_ms,
+            drop_unmatched=args.sparse_view
+        )
+        post_total = len(views)
+        dropped = max(0, original_total - post_total)
+        unmatched_rgb_only = max(0, post_total - matched)
+        print(
+            f"Attached GPS translation poses to {matched}/{original_total} views; "
+            f"dropped {dropped} pre-match views; {unmatched_rgb_only} RGB-only views."
+        )
 
     # Run model inference
     print(f"Running inference on {len(views)} views...")
@@ -252,16 +328,21 @@ def main():
 
     # GPS debug viz
     gps_rows = read_gps_csv(args.gps_csv)
-    origin = gps_rows[0]
-    matches = match_images_to_gps(
-        image_paths=image_paths,
-        gps=gps_rows,
-        tolerance_ns=int(args.tolerance_ms * 1e6)
-    )
-    trans_enu_0 = None
-    first_g = next(iter(matches.values()))
+    
+    if args.interp_gps:
+        interp_enu, _ = build_enu_interpolator(gps_rows)
+        trans_enu_0 = None
+    else:
+        origin = gps_rows[0]
+        matches = match_images_to_gps(
+            image_paths=image_paths,
+            gps=gps_rows,
+            tolerance_ns=int(args.tolerance_ms * 1e6),
+        )
+        trans_enu_0 = None
+
+    # first_g = next(iter(matches.values()))
     # gather matched GPS traj for the kept views
-    gps_rdf = []
     gps_enu = []
     # Accumulators for viewer & final outputs
     all_pts = []
@@ -325,11 +406,27 @@ def main():
 
             view = views[view_idx]
             idx_v = int(view.get("idx", 0))
-            g = matches.get(image_paths[idx_v])
-            if g is not None:
-                e, n, u = pm.geodetic2enu(g.lat, g.lon, g.alt, origin.lat, origin.lon, origin.alt)
-                # if g is first_g:
-                curr = torch.tensor([float(e), float(n), float(u)], dtype=torch.float32)
+
+            if args.interp_gps:
+                ts = extract_ts_ns(image_paths[idx_v])
+                if ts is not None:
+                    e, n, u = interp_enu(ts)
+                    if np.isfinite(e) and np.isfinite(n) and np.isfinite(u):
+                        curr = torch.tensor([float(e), float(n), float(u)], dtype=torch.float32)
+                    else:
+                        curr = None
+                else:
+                    curr = None
+            else:
+                g = matches.get(image_paths[idx_v])
+                if g is not None:
+                    e, n, u = pm.geodetic2enu(g.lat, g.lon, g.alt, origin.lat, origin.lon, origin.alt)
+                    # if g is first_g:
+                    curr = torch.tensor([float(e), float(n), float(u)], dtype=torch.float32)
+                else:
+                    curr = None
+            
+            if curr is not None:
                 if trans_enu_0 is None:
                     trans_enu_0 = curr
                 # T_enu2rdf = get_coord_system_transform("RFU", "RDF")

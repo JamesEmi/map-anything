@@ -144,3 +144,27 @@ def attach_translation_poses_from_gps(
         matched_count += 1
 
     return matched_count, len(views)
+
+def build_enu_interpolator(gps_rows):
+    t_ns = np.array([g.t_ns for g in gps_rows], dtype=np.int64)
+    order = np.argsort(t_ns)
+    gps_sorted = [gps_rows[i] for i in order]
+    t_ns = t_ns[order]
+
+    g0 = gps_sorted[0]
+    e_list, n_list, u_list = [], [], []
+    for g in gps_sorted:
+        e, n, u = pm.geodetic2enu(g.lat, g.lon, g.alt, g0.lat, g0.lon, g0.alt)
+        e_list.append(e); n_list.append(n); u_list.append(u)
+    e_arr = np.asarray(e_list, dtype=np.float64)
+    n_arr = np.asarray(n_list, dtype=np.float64)
+    u_arr = np.asarray(u_list, dtype=np.float64)
+
+    def interp(ts_ns):
+        ts = np.asarray(ts_ns, dtype=np.int64)
+        e = np.interp(ts, t_ns, e_arr, left=np.nan, right=np.nan)
+        n = np.interp(ts, t_ns, n_arr, left=np.nan, right=np.nan)
+        u = np.interp(ts, t_ns, u_arr, left=np.nan, right=np.nan)
+        return e, n, u
+
+    return interp, {"t_ns": t_ns, "origin": (g0.lat, g0.lon, g0.alt)}
