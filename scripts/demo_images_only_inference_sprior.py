@@ -393,8 +393,8 @@ def create_chunks(views, chunk_size, overlap):
         if start == 0:
             overlap_indices = []
         else:
-            # overlap_indices = list(range(min(overlap, len(chunk_views))))
-            overlap_indices = list(range(len(chunk_views)))
+            overlap_indices = list(range(min(overlap, len(chunk_views))))
+            # overlap_indices = list(range(len(chunk_views)))
 
         chunks.append((chunk_views, overlap_indices, start))
 
@@ -546,16 +546,16 @@ def run_chunked_inference(
                 mask_edges=False, # False because we don't want depths set to 0 - OOD.
             )
 
-        # # Print mean depth for this chunk
-        # chunk_depths = []
-        # for output in chunk_outputs:
-        #     if "depth_z" in output:
-        #         depth = output["depth_z"][0].cpu().numpy()
-        #         mask = output["mask"][0].squeeze(-1).cpu().numpy() if "mask" in output else (depth > 0)
-        #         if mask.any():
-        #             chunk_depths.append(depth[mask].mean())
-        # if chunk_depths:
-        #     print(f"  Chunk {chunk_idx} mean depth: {np.mean(chunk_depths):.4f}")
+        # Print mean depth for this chunk
+        chunk_depths = []
+        for output in chunk_outputs:
+            if "depth_z" in output:
+                depth = output["depth_z"][0].cpu().numpy()
+                mask = output["mask"][0].squeeze(-1).cpu().numpy() if "mask" in output else (depth > 0)
+                if mask.any():
+                    chunk_depths.append(depth[mask].mean())
+        if chunk_depths:
+            print(f"  Chunk {chunk_idx + 1} mean depth: {np.mean(chunk_depths):.4f}")
 
         # Store outputs by global index (use latest for overlaps)
         for local_idx, output in enumerate(chunk_outputs):
