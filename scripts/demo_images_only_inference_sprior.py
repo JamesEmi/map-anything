@@ -518,6 +518,7 @@ def run_chunked_inference(
             # Inject priors AFTER validation but BEFORE preprocessing (native forward() format)
             if inject_priors_flag and prev_chunk_outputs is not None and overlap_indices:
                 print(f"  Injecting priors into {len(overlap_indices)} overlap frames (native forward() format)")
+                # import ipdb; ipdb.set_trace()
                 validated_views = inject_priors(
                     validated_views,
                     overlap_indices,
@@ -537,6 +538,7 @@ def run_chunked_inference(
                         memory_efficient_inference=memory_efficient_inference,
                         minibatch_size=minibatch_size,
                     )
+                    # import ipdb; ipdb.set_trace()
 
             # Post-process outputs
             chunk_outputs = postprocess_model_outputs_for_inference(
@@ -615,8 +617,8 @@ def main():
         resolution_set=resolution,
         norm_type=norm_type,
         patch_size=14,
-        resize_mode="fixed_size",
-        size=(294, 294) #TODO: make this flexible, pull from prior_pred.depth_along_ray.shape 
+        resize_mode="fixed_mapping",
+        # size=(294, 294) #TODO: make this flexible, pull from prior_pred.depth_along_ray.shape 
     )
     print(f"Loaded {len(views)} views")
 
@@ -813,8 +815,10 @@ def main():
 
             if args.video_viz_for_rerun:
                 view_base_name = "reconstruction/view"
+                pts_name = "reconstruction/pointcloud"
             else:
                 view_base_name = f"reconstruction/view_{view_idx}"
+                pts_name = f"reconstruction/pointcloud_view_{view_idx}"
 
             # Extract confidence if visualization is enabled
             conf_np = None
@@ -829,7 +833,7 @@ def main():
                 pts3d=pts3d_np,
                 mask=mask,
                 base_name=view_base_name,
-                pts_name=f"reconstruction/pointcloud_view_{view_idx}",
+                pts_name=pts_name,
                 viz_mask=mask,
                 confidence=conf_np,
                 conf_vmin=conf_min,
