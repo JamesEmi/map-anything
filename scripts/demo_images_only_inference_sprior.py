@@ -270,6 +270,12 @@ def get_parser():
         default=False,
         help="Inject priors from previous chunk into overlap frames of current chunk.",
     )
+    parser.add_argument(
+        "--pose_transform",
+        action="store_true",
+        default=False,
+        help="Transform chunk poses to global world frame (chunk 0 view 0 as origin).",
+    )
     return parser
 
 
@@ -453,6 +459,37 @@ def inject_priors(views, overlap_indices, prev_outputs, device):
 
     return views
 
+def chunk2world_transform(chunk_outputs, world_T_chunk_ref, device):
+    """
+    Transform all poses and points in chunk_outputs from chunk-local frame to world frame.
+
+    Args:
+        chunk_outputs: List of output dicts with 'camera_poses' (B, 4, 4) and 'pts3d' (B, H, W, 3)
+        world_T_chunk_ref: 4x4 transform from chunk's reference frame to world frame
+        device: Torch device
+
+    Returns:
+        Modified chunk_outputs with poses and points in world frame
+    """
+    for output in chunk_outputs:
+        if "camera_poses" in output:
+            # chunk_local_pose is cam2chunk_ref
+            # we want cam2world = word_T_chunk_ref @ cam2chunk_ref
+            local_pose = output["camera_poses"] # (B, 4, 4)
+            world_pose = world_T_chunk_ref @ local_pose
+            output["camera_poses"] = world_pose
+        
+        if "pts3d" in output:
+            pts = output["pts3d"]  # (B, H, W, 3)
+            B, H, W, _ = pts.shape
+            pts_flat = pts.reshape(B, -1, 3)  # (B, H*W, 3)
+            # Transform points: p_world = R @ p_local + t
+            R = world_T_chunk_ref[:3, :3]
+            t = world_T_chunk_ref[:3, 3]
+            pts_world = (pts_flat @ R.T) + t
+            output["pts3d"] = pts_world.reshape(B, H, W, 3)
+
+    return chunk_outputs
 
 def run_chunked_inference(
     model,
@@ -460,6 +497,7 @@ def run_chunked_inference(
     chunk_size,
     overlap,
     inject_priors_flag,
+    pose_transform_flag,
     device,
     use_external_model,
     memory_efficient_inference=True,
@@ -476,6 +514,7 @@ def run_chunked_inference(
         chunk_size: Number of views per chunk
         overlap: Number of overlapping views between chunks
         inject_priors_flag: Whether to inject priors from previous chunk
+        pose_transform_flag: Whether to transform poses to global world frame
         device: Torch device
         use_external_model: Whether using external model (different inference path)
         memory_efficient_inference: Use memory efficient mode for forward()
@@ -559,7 +598,45 @@ def run_chunked_inference(
         if chunk_depths:
             print(f"  Chunk {chunk_idx + 1} mean depth: {np.mean(chunk_depths):.4f}")
 
+        # Print mean metric scale factor across views in this chunk
+        chunk_scale_factors = []
+        for output in chunk_outputs:
+            if "metric_scaling_factor" in output:
+                chunk_scale_factors.append(output["metric_scaling_factor"][0].item())
+        if chunk_scale_factors:
+            print(f"  Chunk {chunk_idx + 1} mean metric scale factor: {np.mean(chunk_scale_factors):.4f}")
+
+        # Transform chunk poses to world frame if enabled
+        if pose_transform_flag:
+            if chunk_idx == 0:
+                # Chunk 0: reference frame is world origin, no transform needed
+                # Store the pose of the frame that will be the next chunk's reference
+                if overlap > 0 and len(chunk_outputs) >= chunk_size:
+                    # Next chunk starts at index (chunk_size - overlap) in global coords
+                    # That corresponds to local index (chunk_size - overlap) in this chunk
+                    next_ref_local_idx = chunk_size - overlap
+                    if next_ref_local_idx < len(chunk_outputs) and "camera_poses" in chunk_outputs[next_ref_local_idx]:
+                        world_T_next_chunk_ref = chunk_outputs[next_ref_local_idx]["camera_poses"][0].clone()
+                    else:
+                        world_T_next_chunk_ref = torch.eye(4, device=device)
+                else:
+                    world_T_next_chunk_ref = torch.eye(4, device=device)
+            else:
+                # Transform all poses/points in this chunk to world frame
+                chunk_outputs = chunk2world_transform(
+                    chunk_outputs, world_T_next_chunk_ref, device
+                )
+                print(f"  Transformed chunk {chunk_idx + 1} to world frame")
+
+                # Update world_T_next_chunk_ref for the next chunk
+                # Next chunk's reference is at local index (chunk_size - overlap)
+                if overlap > 0:
+                    next_ref_local_idx = chunk_size - overlap
+                    if next_ref_local_idx < len(chunk_outputs) and "camera_poses" in chunk_outputs[next_ref_local_idx]:
+                        world_T_next_chunk_ref = chunk_outputs[next_ref_local_idx]["camera_poses"][0].clone()
+
         # Store outputs by global index (use latest for overlaps)
+        # TODO: Make overlap handling flexible (options: use previous, use current, average)
         for local_idx, output in enumerate(chunk_outputs):
             global_idx = start_idx + local_idx
             global_view_outputs[global_idx] = output
@@ -634,13 +711,14 @@ def main():
     # Run model inference
     print(f"Running {model_display_name} inference...")
     if args.chunk_size is not None:
-        print(f"  Chunked inference: chunk_size={args.chunk_size}, overlap={args.overlap}, inject_priors={args.inject_priors}")
+        print(f"  Chunked inference: chunk_size={args.chunk_size}, overlap={args.overlap}, inject_priors={args.inject_priors}, pose_transform={args.pose_transform}")
         outputs = run_chunked_inference(
             model=model,
             views=views,
             chunk_size=args.chunk_size,
             overlap=args.overlap,
             inject_priors_flag=args.inject_priors,
+            pose_transform_flag=args.pose_transform,
             device=device,
             use_external_model=use_external_model,
         )
